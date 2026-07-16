@@ -1,5 +1,7 @@
 # MiniMapMod
 
+Main Mod Credit: wagswag. / Wag-swag
+
 A MelonLoader minimap mod for A Township Tale.
 
 ## Controls
