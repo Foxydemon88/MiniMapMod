@@ -21,6 +21,9 @@ namespace MiniMapMod
         private const float ScreenMapLocalMinY = 0.6489f;
         private const float ScreenMapLocalMaxY = 2.6891f;
         private const float ControlsHeight = 210f;
+        private const float MaskOverlayAlpha = 1f;
+        private const int TownshipMapPieceCount = 17;
+        private const int TownshipUnusedLockedPieceTolerance = 2;
 
         private static readonly Vector2 ScreenMapRefA = new Vector2(-0.7f, 1f);
         private static readonly Vector2 ScreenMapRefB = new Vector2(0f, 2.3f);
@@ -28,17 +31,18 @@ namespace MiniMapMod
         private static readonly Vector2 ScreenMapWorldRefA = new Vector2(-1425.5f, -347.3f);
         private static readonly Vector2 ScreenMapWorldRefB = new Vector2(-849.7f, 737.1f);
         private static readonly Vector2 ScreenMapWorldRefC = new Vector2(62.2f, -102.2f);
-
         private readonly List<ScreenMapPlayer> _screenMapPlayers = new List<ScreenMapPlayer>();
+        private readonly List<ScreenMapMask> _screenMapMasks = new List<ScreenMapMask>();
         private Rect _screenMapWindow = new Rect(340f, 20f, 320f, 530f);
         private Vector2 _menuScroll;
         private MapBoard _screenMapBoard;
         private Texture2D _screenMapTexture;
         private string _screenMapStatus = "Press Refresh Players or Reload Map Background.";
         private string _screenMapBackgroundStatus = "map not loaded";
+        private string _screenMapMaskStatus = "covers not scanned";
         private float _screenMapSize = 300f;
         private float _screenMapMarkerOffsetX = -5f;
-        private float _screenMapMarkerOffsetY = -41f;
+        private float _screenMapMarkerOffsetY = -42f;
         private bool _screenMapBackgroundLocked = true;
         private bool _mapOpen;
         private bool _savedCursorStateForMap;
@@ -109,7 +113,8 @@ namespace MiniMapMod
             }
 
             GUI.color = oldColor;
-            DrawScreenMapPlayers(mapRect, _screenMapBoard, _screenMapPlayers, new Vector2(_screenMapMarkerOffsetX, _screenMapMarkerOffsetY));
+            DrawScreenMapMasks(mapRect, _screenMapMasks);
+            DrawScreenMapPlayers(mapRect, _screenMapBoard, _screenMapPlayers, _screenMapMasks, new Vector2(_screenMapMarkerOffsetX, _screenMapMarkerOffsetY));
 
             GUILayout.BeginArea(new Rect(10f, _screenMapSize + 8f, _screenMapSize - 20f, ControlsHeight - 16f));
             _menuScroll = GUILayout.BeginScrollView(_menuScroll);
@@ -123,6 +128,7 @@ namespace MiniMapMod
             if (GUILayout.Button("Reload Map Background"))
             {
                 RefreshScreenMapBackground(true);
+                RefreshScreenMapMasks();
                 _screenMapStatus = BuildScreenMapStatus("manual");
             }
 
@@ -191,6 +197,7 @@ namespace MiniMapMod
         private string RefreshScreenMapSnapshot(bool replaceExisting)
         {
             RefreshScreenMapBackground(replaceExisting);
+            RefreshScreenMapMasks();
             return RefreshScreenMapPlayers();
         }
 
@@ -206,6 +213,12 @@ namespace MiniMapMod
             }
 
             return BuildScreenMapStatus(source);
+        }
+
+        private void RefreshScreenMapMasks()
+        {
+            _screenMapMasks.Clear();
+            _screenMapMaskStatus = AddScreenMapMasksFromScene(_screenMapMasks);
         }
 
         private void RefreshScreenMapBackground(bool replaceExisting)
@@ -244,16 +257,45 @@ namespace MiniMapMod
 
             _screenMapBackgroundStatus = _screenMapTexture != null && IsUsableScreenMapTexture(_screenMapTexture)
                 ? "kept old texture"
-                : "fallback";
+                : "waiting for discovered map render";
         }
 
         private string BuildScreenMapStatus(string source)
         {
             var boardText = _screenMapBoard != null ? "board" : "no board";
-            return "Minimap: " + _screenMapPlayers.Count + " players, " + boardText + ", " + _screenMapBackgroundStatus + ", " + source + ".";
+            return "Minimap: " + _screenMapPlayers.Count + " players, " + _screenMapMasks.Count + " covers, " + _screenMapMaskStatus + ", " + boardText + ", " + _screenMapBackgroundStatus + ", " + source + ".";
         }
 
-        private static void DrawScreenMapPlayers(Rect mapRect, MapBoard board, List<ScreenMapPlayer> players, Vector2 markerOffset)
+        private static void DrawScreenMapMasks(Rect mapRect, List<ScreenMapMask> masks)
+        {
+            if (masks == null || masks.Count == 0)
+            {
+                return;
+            }
+
+            var oldColor = GUI.color;
+            for (var i = 0; i < masks.Count; i++)
+            {
+                var mask = masks[i];
+                var rect = new Rect(
+                    mapRect.x + mask.NormalizedRect.xMin * mapRect.width,
+                    mapRect.y + mask.NormalizedRect.yMin * mapRect.height,
+                    mask.NormalizedRect.width * mapRect.width,
+                    mask.NormalizedRect.height * mapRect.height);
+
+                if (rect.width <= 1f || rect.height <= 1f)
+                {
+                    continue;
+                }
+
+                GUI.color = new Color(0f, 0f, 0f, MaskOverlayAlpha);
+                GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            }
+
+            GUI.color = oldColor;
+        }
+
+        private static void DrawScreenMapPlayers(Rect mapRect, MapBoard board, List<ScreenMapPlayer> players, List<ScreenMapMask> masks, Vector2 markerOffset)
         {
             if (players == null || players.Count == 0)
             {
@@ -284,6 +326,11 @@ namespace MiniMapMod
                     continue;
                 }
 
+                if (IsScreenPointCovered(screenPoint.Value, mapRect, masks))
+                {
+                    continue;
+                }
+
                 var markerPoint = screenPoint.Value + markerOffset;
                 DrawScreenMapDot(markerPoint, player.IsLocal ? Color.yellow : Color.red);
                 GUI.color = player.IsLocal ? Color.yellow : Color.red;
@@ -298,6 +345,28 @@ namespace MiniMapMod
             GUI.color = color;
             GUI.DrawTexture(new Rect(point.x - 4f, point.y - 4f, 8f, 8f), Texture2D.whiteTexture);
             GUI.color = oldColor;
+        }
+
+        private static bool IsScreenPointCovered(Vector2 point, Rect mapRect, List<ScreenMapMask> masks)
+        {
+            if (masks == null || masks.Count == 0 || mapRect.width <= 0.001f || mapRect.height <= 0.001f)
+            {
+                return false;
+            }
+
+            var normalized = new Vector2(
+                Mathf.Clamp01((point.x - mapRect.x) / mapRect.width),
+                Mathf.Clamp01((point.y - mapRect.y) / mapRect.height));
+
+            for (var i = 0; i < masks.Count; i++)
+            {
+                if (masks[i].NormalizedRect.Contains(normalized))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static Vector2? MapBoardWorldToScreen(MapBoard board, Vector3 worldPosition, Rect mapRect)
@@ -370,6 +439,426 @@ namespace MiniMapMod
             }
 
             return players.Count > 0 ? players[0].Position : (Vector3?)null;
+        }
+
+        private static string AddScreenMapMasksFromScene(List<ScreenMapMask> masks)
+        {
+            return AddLockedMapPieceMasks(masks);
+        }
+
+        private static string AddLockedMapPieceMasks(List<ScreenMapMask> masks)
+        {
+            if (masks == null)
+            {
+                return "no mask list";
+            }
+
+            var board = FindBestMapBoard();
+            if (board == null)
+            {
+                return "no board for locks";
+            }
+
+            var map = TryReadObjectMember(board, "Map") ?? TryReadObjectMember(board, "map");
+            var managers = FindPlayerMapManagers();
+            if (managers.Count == 0)
+            {
+                return "no map manager";
+            }
+
+            var bestLocked = int.MaxValue;
+            var bestTotal = 0;
+            var bestSource = "no lock state";
+            var sawState = false;
+
+            for (var i = 0; i < managers.Count; i++)
+            {
+                var manager = managers[i];
+                var states = TryGetMapPieceStates(manager, map);
+                if (states != null && states.Count > 0)
+                {
+                    sawState = true;
+                    var lockedCount = CountLockedPieces(states);
+                    if (IsEffectivelyFullyUnlocked(lockedCount, states.Count))
+                    {
+                        return "all pieces visible " + (states.Count - lockedCount).ToString() + "/" + states.Count.ToString();
+                    }
+
+                    if (lockedCount < bestLocked)
+                    {
+                        bestLocked = lockedCount;
+                        bestTotal = states.Count;
+                        bestSource = "state full cover";
+                    }
+                }
+
+                var undiscovered = TryGetUndiscoveredMapPieceIndexes(manager, map);
+                if (undiscovered.Count == 0)
+                {
+                    if (sawState)
+                    {
+                        continue;
+                    }
+
+                    continue;
+                }
+
+                var total = Mathf.Max(states != null ? states.Count : 0, FindMaxIndex(undiscovered) + 1, TownshipMapPieceCount);
+                if (IsEffectivelyFullyUnlocked(undiscovered.Count, total))
+                {
+                    return "all pieces visible " + (total - undiscovered.Count).ToString() + "/" + total.ToString();
+                }
+
+                if (undiscovered.Count < bestLocked)
+                {
+                    bestLocked = undiscovered.Count;
+                    bestTotal = total;
+                    bestSource = "locked full cover";
+                }
+            }
+
+            if (bestLocked != int.MaxValue)
+            {
+                AddFullMapMask(masks);
+                return bestSource + " " + bestLocked.ToString() + "/" + bestTotal.ToString() + " from " + managers.Count.ToString() + " managers";
+            }
+
+            return "no lock state";
+        }
+
+        private static int CountLockedPieces(List<bool> states)
+        {
+            var locked = 0;
+            if (states == null)
+            {
+                return locked;
+            }
+
+            for (var i = 0; i < states.Count; i++)
+            {
+                if (!states[i])
+                {
+                    locked++;
+                }
+            }
+
+            return locked;
+        }
+
+        private static bool IsEffectivelyFullyUnlocked(int lockedCount, int totalCount)
+        {
+            if (lockedCount <= 0)
+            {
+                return true;
+            }
+
+            return totalCount == TownshipMapPieceCount && lockedCount <= TownshipUnusedLockedPieceTolerance;
+        }
+
+        private static void AddFullMapMask(List<ScreenMapMask> masks)
+        {
+            if (masks == null)
+            {
+                return;
+            }
+
+            masks.Add(new ScreenMapMask
+            {
+                NormalizedRect = new Rect(0f, 0f, 1f, 1f)
+            });
+        }
+
+        private static List<object> FindPlayerMapManagers()
+        {
+            var managers = new List<object>();
+            var mapManagerType = FindType("Alta.Map.MapManager");
+            var mapManager = TryReadStaticObjectMember(mapManagerType, "Instance");
+            if (mapManager == null && mapManagerType != null)
+            {
+                try
+                {
+                    var found = UnityEngine.Object.FindObjectsOfType(mapManagerType);
+                    if (found != null && found.Length > 0)
+                    {
+                        mapManager = found[0];
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            AddUniqueObject(managers, TryInvokeObjectMethod(mapManager, "GetSharedManager"));
+            AddUniqueObject(managers, TryReadObjectMember(mapManager, "singleManager"));
+
+            var managerDictionary = TryReadObjectMember(mapManager, "managers") as IDictionary;
+            if (managerDictionary != null)
+            {
+                foreach (DictionaryEntry entry in managerDictionary)
+                {
+                    AddUniqueObject(managers, entry.Value);
+                }
+            }
+
+            return managers;
+        }
+
+        private static List<int> TryGetUndiscoveredMapPieceIndexes(object manager, object map)
+        {
+            var indexes = new List<int>();
+            var result = map != null
+                ? TryInvokeObjectMethod(manager, "GetUndiscoveredMapPieces", map)
+                : null;
+
+            var enumerable = result as IEnumerable;
+            if (enumerable == null)
+            {
+                return indexes;
+            }
+
+            foreach (var item in enumerable)
+            {
+                AddIntValue(indexes, item);
+            }
+
+            return indexes;
+        }
+
+        private static List<bool> TryGetMapPieceStates(object manager, object map)
+        {
+            var save = TryReadObjectMember(manager, "save");
+            var states = TryReadObjectMember(save, "MapPieceStates");
+            if (states == null)
+            {
+                states = TryReadObjectMember(save, "<MapPieceStates>k__BackingField");
+            }
+
+            var direct = ReadBooleanList(states);
+            if (direct.Count > 0)
+            {
+                return direct;
+            }
+
+            var dictionary = states as IDictionary;
+            if (dictionary != null)
+            {
+                if (map != null && dictionary.Contains(map))
+                {
+                    var mapped = ReadBooleanList(dictionary[map]);
+                    if (mapped.Count > 0)
+                    {
+                        return mapped;
+                    }
+                }
+
+                foreach (DictionaryEntry entry in dictionary)
+                {
+                    var mapped = ReadBooleanList(entry.Value);
+                    if (mapped.Count > 0)
+                    {
+                        return mapped;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static int FindMapPieceStateCount(object manager, object map)
+        {
+            var states = TryGetMapPieceStates(manager, map);
+            return states != null ? states.Count : 0;
+        }
+
+        private static List<bool> ReadBooleanList(object value)
+        {
+            var results = new List<bool>();
+            var enumerable = value as IEnumerable;
+            if (enumerable == null || value is string)
+            {
+                return results;
+            }
+
+            foreach (var item in enumerable)
+            {
+                if (item is bool)
+                {
+                    results.Add((bool)item);
+                }
+            }
+
+            return results;
+        }
+
+        private static void AddIntValue(List<int> values, object value)
+        {
+            if (values == null || value == null)
+            {
+                return;
+            }
+
+            try
+            {
+                values.Add(Convert.ToInt32(value));
+            }
+            catch
+            {
+            }
+        }
+
+        private static int FindMaxIndex(List<int> values)
+        {
+            var max = -1;
+            if (values == null)
+            {
+                return max;
+            }
+
+            for (var i = 0; i < values.Count; i++)
+            {
+                if (values[i] > max)
+                {
+                    max = values[i];
+                }
+            }
+
+            return max;
+        }
+
+        private static void AddUniqueObject(List<object> values, object value)
+        {
+            if (values == null || value == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < values.Count; i++)
+            {
+                if (object.ReferenceEquals(values[i], value))
+                {
+                    return;
+                }
+            }
+
+            values.Add(value);
+        }
+
+        private static void AddScreenMapMask(List<ScreenMapMask> masks, object maskPiece)
+        {
+            if (masks == null || maskPiece == null)
+            {
+                return;
+            }
+
+            if (IsReleasedMaskPiece(maskPiece))
+            {
+                return;
+            }
+
+            var rectTransform = TryReadObjectMember(maskPiece, "RectTransform") as RectTransform;
+            if (rectTransform == null || !rectTransform.gameObject.activeInHierarchy)
+            {
+                return;
+            }
+
+            var normalizedRect = TryGetNormalizedMaskRect(rectTransform);
+            if (!normalizedRect.HasValue)
+            {
+                return;
+            }
+
+            var rect = normalizedRect.Value;
+            if (rect.width <= 0.001f || rect.height <= 0.001f)
+            {
+                return;
+            }
+
+            masks.Add(new ScreenMapMask
+            {
+                NormalizedRect = rect
+            });
+        }
+
+        private static bool IsReleasedMaskPiece(object maskPiece)
+        {
+            var released = TryReadObjectMember(maskPiece, "IsReleased");
+            return released is bool && (bool)released;
+        }
+
+        private static Rect? TryGetNormalizedMaskRect(RectTransform rectTransform)
+        {
+            var parent = FindMaskReferenceRect(rectTransform);
+            if (parent == null)
+            {
+                return null;
+            }
+
+            var worldCorners = new Vector3[4];
+            rectTransform.GetWorldCorners(worldCorners);
+
+            var minX = float.MaxValue;
+            var minY = float.MaxValue;
+            var maxX = float.MinValue;
+            var maxY = float.MinValue;
+            for (var i = 0; i < worldCorners.Length; i++)
+            {
+                var local = parent.InverseTransformPoint(worldCorners[i]);
+                minX = Mathf.Min(minX, local.x);
+                minY = Mathf.Min(minY, local.y);
+                maxX = Mathf.Max(maxX, local.x);
+                maxY = Mathf.Max(maxY, local.y);
+            }
+
+            var parentRect = parent.rect;
+            if (parentRect.width <= 0.001f || parentRect.height <= 0.001f)
+            {
+                return null;
+            }
+
+            var xMin = Mathf.Clamp01((minX - parentRect.xMin) / parentRect.width);
+            var xMax = Mathf.Clamp01((maxX - parentRect.xMin) / parentRect.width);
+            var yMin = Mathf.Clamp01(1f - ((maxY - parentRect.yMin) / parentRect.height));
+            var yMax = Mathf.Clamp01(1f - ((minY - parentRect.yMin) / parentRect.height));
+            return Rect.MinMaxRect(Mathf.Min(xMin, xMax), Mathf.Min(yMin, yMax), Mathf.Max(xMin, xMax), Mathf.Max(yMin, yMax));
+        }
+
+        private static RectTransform FindMaskReferenceRect(RectTransform rectTransform)
+        {
+            var current = rectTransform.parent as RectTransform;
+            RectTransform best = null;
+            var bestArea = 0f;
+
+            while (current != null)
+            {
+                var area = Mathf.Abs(current.rect.width * current.rect.height);
+                if (area > bestArea)
+                {
+                    best = current;
+                    bestArea = area;
+                }
+
+                current = current.parent as RectTransform;
+            }
+
+            return best;
+        }
+
+        private static Texture TryGetMaskTexture(object maskPiece)
+        {
+            var image = TryReadObjectMember(maskPiece, "image");
+            if (image == null)
+            {
+                return null;
+            }
+
+            var mainTexture = TryReadObjectMember(image, "mainTexture") as Texture;
+            if (mainTexture != null)
+            {
+                return mainTexture;
+            }
+
+            var sprite = TryReadObjectMember(image, "sprite");
+            return TryReadObjectMember(sprite, "texture") as Texture;
         }
 
         private static string AddScreenMapPlayersFromRoster(List<ScreenMapPlayer> players)
@@ -648,7 +1137,7 @@ namespace MiniMapMod
             var bestPixels = 0;
             for (var i = 0; i < renderers.Length; i++)
             {
-                var texture = TryGetTextureFromRendererObject(renderers[i]);
+                var texture = TryGetRenderedMapTexture(renderers[i]);
                 if (!IsUsableScreenMapTexture(texture))
                 {
                     continue;
@@ -704,14 +1193,17 @@ namespace MiniMapMod
             }
         }
 
-        private static Texture TryGetTextureFromRendererObject(object rendererObject)
+        private static Texture TryGetRenderedMapTexture(object rendererObject)
         {
             if (rendererObject == null)
             {
                 return null;
             }
 
-            var names = new[] { "rt", "renderTexture", "map", "mapTexture", "texture" };
+            TryInvokeObjectMethod(rendererObject, "QueueRender");
+            TryInvokeObjectMethod(rendererObject, "RenderMap");
+
+            var names = new[] { "rt", "renderTexture", "renderedMap", "renderedTexture" };
             for (var i = 0; i < names.Length; i++)
             {
                 var texture = TryReadObjectMember(rendererObject, names[i]) as Texture;
@@ -721,10 +1213,47 @@ namespace MiniMapMod
                 }
             }
 
+            var rawMap = TryReadObjectMember(rendererObject, "map") as Texture;
             var previewRenderer = TryReadObjectMember(rendererObject, "previewRenderer") as Renderer;
             if (previewRenderer != null && previewRenderer.material != null && previewRenderer.material.mainTexture != null)
             {
-                return previewRenderer.material.mainTexture;
+                var previewTexture = previewRenderer.material.mainTexture;
+                return object.ReferenceEquals(previewTexture, rawMap) ? null : previewTexture;
+            }
+
+            return null;
+        }
+
+        private static object TryInvokeObjectMethod(object instance, string name, params object[] args)
+        {
+            if (instance == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                var methods = instance.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                for (var i = 0; i < methods.Length; i++)
+                {
+                    var method = methods[i];
+                    if (method == null || method.Name != name)
+                    {
+                        continue;
+                    }
+
+                    var parameters = method.GetParameters();
+                    var argumentCount = args != null ? args.Length : 0;
+                    if (parameters.Length != argumentCount)
+                    {
+                        continue;
+                    }
+
+                    return method.Invoke(instance, args);
+                }
+            }
+            catch
+            {
             }
 
             return null;
@@ -983,5 +1512,11 @@ namespace MiniMapMod
             public Vector3 Position;
             public bool IsLocal;
         }
+
+        private sealed class ScreenMapMask
+        {
+            public Rect NormalizedRect;
+        }
+
     }
 }
