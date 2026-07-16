@@ -1,6 +1,6 @@
 # MiniMapMod
 
-A small MelonLoader minimap mod for A Township Tale.
+A MelonLoader minimap mod for A Township Tale.
 
 ## Controls
 
@@ -12,20 +12,4 @@ A small MelonLoader minimap mod for A Township Tale.
 - `Size`: resize the minimap window.
 - `Marker X/Y Offset`: adjust marker alignment over the captured map.
 
-When the minimap is open, the menu controls sit directly underneath the map. Player markers are drawn from the available runtime player roster when possible, with a local-player fallback.
-
-## Build
-
-```powershell
-.\build.ps1
-```
-
-By default this build uses the TavernLib copy from your flatscreen mod folder:
-
-```text
-..\FlatscreenATTMod\TavernLib-main\Dependencies
-```
-
-To use a different TavernLib checkout, pass `-TavernLibRoot C:\path\to\TavernLib-main`.
-
-Copy `bin\Release\MiniMapMod.dll` into the game's `Mods` folder.
+Copy `MiniMapMod.dll` into the game's `Mods` folder to use.
